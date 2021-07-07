@@ -33,12 +33,12 @@ TEST(domain_expert, lifecycle)
 {
   auto test_node = rclcpp::Node::make_shared("get_action_from_string");
   auto domain_node = std::make_shared<plansys2::DomainExpertNode>();
-  auto domain_client = std::make_shared<plansys2::DomainExpertClient>(test_node);
+  auto domain_client = std::make_shared<plansys2::DomainExpertClient>();
 
   std::string pkgpath = ament_index_cpp::get_package_share_directory("plansys2_domain_expert");
 
   domain_node->set_parameter({"model_file", pkgpath + "/pddl/domain_simple.pddl"});
-  rclcpp::executors::MultiThreadedExecutor exe(rclcpp::executor::ExecutorArgs(), 8);
+  rclcpp::executors::MultiThreadedExecutor exe(rclcpp::ExecutorOptions(), 8);
 
   exe.add_node(domain_node->get_node_base_interface());
 
@@ -100,12 +100,12 @@ TEST(domain_expert, lifecycle_error)
 {
   auto test_node = rclcpp::Node::make_shared("get_action_from_string");
   auto domain_node = std::make_shared<plansys2::DomainExpertNode>();
-  auto domain_client = std::make_shared<plansys2::DomainExpertClient>(test_node);
+  auto domain_client = std::make_shared<plansys2::DomainExpertClient>();
 
   std::string pkgpath = ament_index_cpp::get_package_share_directory("plansys2_domain_expert");
 
   domain_node->set_parameter({"model_file", pkgpath + "/pddl/domain_2_error.pddl"});
-  rclcpp::executors::MultiThreadedExecutor exe(rclcpp::executor::ExecutorArgs(), 8);
+  rclcpp::executors::MultiThreadedExecutor exe(rclcpp::ExecutorOptions(), 8);
 
   exe.add_node(domain_node->get_node_base_interface());
 

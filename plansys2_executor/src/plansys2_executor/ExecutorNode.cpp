@@ -14,6 +14,7 @@
 
 #include <filesystem>
 
+#include <algorithm>
 #include <string>
 #include <memory>
 #include <iostream>
@@ -26,6 +27,7 @@
 #include "plansys2_executor/ActionExecutor.hpp"
 #include "plansys2_executor/BTBuilder.hpp"
 #include "plansys2_problem_expert/Utils.hpp"
+#include "plansys2_pddl_parser/Utils.h"
 
 #include "lifecycle_msgs/msg/state.hpp"
 #include "plansys2_msgs/msg/action_execution_info.hpp"
@@ -46,6 +48,7 @@
 #include "plansys2_executor/behavior_tree/wait_atstart_req_node.hpp"
 #include "plansys2_executor/behavior_tree/check_overall_req_node.hpp"
 #include "plansys2_executor/behavior_tree/check_atend_req_node.hpp"
+#include "plansys2_executor/behavior_tree/check_timeout_node.hpp"
 #include "plansys2_executor/behavior_tree/apply_atstart_effect_node.hpp"
 #include "plansys2_executor/behavior_tree/apply_atend_effect_node.hpp"
 
@@ -60,9 +63,15 @@ ExecutorNode::ExecutorNode()
 {
   using namespace std::placeholders;
 
-  declare_parameter("default_action_bt_xml_filename");
+  this->declare_parameter<std::string>("default_action_bt_xml_filename", "");
   this->declare_parameter<bool>("enable_dotgraph_legend", true);
   this->declare_parameter<bool>("print_graph", false);
+  this->declare_parameter("action_timeouts.actions", std::vector<std::string>{});
+  // Declaring individual action parameters so they can be queried on the command line
+  auto action_timeouts_actions = this->get_parameter("action_timeouts.actions").as_string_array();
+  for (auto action : action_timeouts_actions) {
+    this->declare_parameter("action_timeouts." + action + ".duration_overrun_percentage");
+  }
 
 #ifdef ZMQ_FOUND
   this->declare_parameter<bool>("enable_groot_monitoring", true);
@@ -87,6 +96,13 @@ ExecutorNode::ExecutorNode()
       &ExecutorNode::get_ordered_sub_goals_service_callback,
       this, std::placeholders::_1, std::placeholders::_2,
       std::placeholders::_3));
+
+  get_plan_service_ = create_service<plansys2_msgs::srv::GetPlan>(
+    "executor/get_plan",
+    std::bind(
+      &ExecutorNode::get_plan_service_callback,
+      this, std::placeholders::_1, std::placeholders::_2,
+      std::placeholders::_3));
 }
 
 
@@ -98,8 +114,9 @@ ExecutorNode::on_configure(const rclcpp_lifecycle::State & state)
 {
   RCLCPP_INFO(get_logger(), "[%s] Configuring...", get_name());
 
-  std::string default_action_bt_xml_filename;
-  if (!get_parameter("default_action_bt_xml_filename", default_action_bt_xml_filename)) {
+  auto default_action_bt_xml_filename =
+    this->get_parameter("default_action_bt_xml_filename").as_string();
+  if (default_action_bt_xml_filename.empty()) {
     default_action_bt_xml_filename =
       ament_index_cpp::get_package_share_directory("plansys2_executor") +
       "/behavior_trees/plansys2_action_bt.xml";
@@ -117,9 +134,9 @@ ExecutorNode::on_configure(const rclcpp_lifecycle::State & state)
   dotgraph_pub_ = this->create_publisher<std_msgs::msg::String>("dot_graph", 1);
 
   aux_node_ = std::make_shared<rclcpp::Node>("executor_helper");
-  domain_client_ = std::make_shared<plansys2::DomainExpertClient>(aux_node_);
-  problem_client_ = std::make_shared<plansys2::ProblemExpertClient>(aux_node_);
-  planner_client_ = std::make_shared<plansys2::PlannerClient>(aux_node_);
+  domain_client_ = std::make_shared<plansys2::DomainExpertClient>();
+  problem_client_ = std::make_shared<plansys2::ProblemExpertClient>();
+  planner_client_ = std::make_shared<plansys2::PlannerClient>();
 
   execution_info_pub_ = create_publisher<plansys2_msgs::msg::ActionExecutionInfo>(
     "/action_execution_info", 100);
@@ -184,9 +201,7 @@ ExecutorNode::get_ordered_sub_goals_service_callback(
   const std::shared_ptr<plansys2_msgs::srv::GetOrderedSubGoals::Response> response)
 {
   if (ordered_sub_goals_.has_value()) {
-    for (auto goal : ordered_sub_goals_.value()) {
-      response->sub_goals.push_back(goal.toString());
-    }
+    response->sub_goals = ordered_sub_goals_.value();
     response->success = true;
   } else {
     response->success = false;
@@ -194,34 +209,25 @@ ExecutorNode::get_ordered_sub_goals_service_callback(
   }
 }
 
-std::optional<std::vector<parser::pddl::tree::Goal>>
+std::optional<std::vector<plansys2_msgs::msg::Tree>>
 ExecutorNode::getOrderedSubGoals()
 {
   if (!current_plan_.has_value()) {
     return {};
   }
 
-  parser::pddl::tree::Goal goal = problem_client_->getGoal();
-  std::vector<parser::pddl::tree::Predicate> predicates = problem_client_->getPredicates();
-  std::set<std::string> local_predicates;
-  for (auto & predicate : predicates) {
-    local_predicates.insert(predicate.toString());
-  }
+  auto goal = problem_client_->getGoal();
+  auto local_predicates = problem_client_->getPredicates();
+  auto local_functions = problem_client_->getFunctions();
 
-  std::vector<parser::pddl::tree::Function> functions = problem_client_->getFunctions();
-  std::map<std::string, double> local_functions;
-  for (auto & function : functions) {
-    local_functions.insert({function.toString(), function.value});
-  }
-
-  std::vector<parser::pddl::tree::Goal> ordered_goals;
-  std::vector<std::shared_ptr<parser::pddl::tree::TreeNode>> unordered_subgoals = get_subtrees(
-    goal.root_);
+  std::vector<plansys2_msgs::msg::Tree> ordered_goals;
+  std::vector<uint32_t> unordered_subgoals = parser::pddl::getSubtrees(goal);
 
   // just in case some goals are already satisfied
   for (auto it = unordered_subgoals.begin(); it != unordered_subgoals.end(); ) {
-    if (check(*it, local_predicates, local_functions)) {
-      parser::pddl::tree::Goal new_goal("(and " + (*it)->toString() + ")");
+    if (check(goal, local_predicates, local_functions, *it)) {
+      plansys2_msgs::msg::Tree new_goal;
+      parser::pddl::fromString(new_goal, "(and " + parser::pddl::toString(goal, (*it)) + ")");
       ordered_goals.push_back(new_goal);
       it = unordered_subgoals.erase(it);
     } else {
@@ -229,15 +235,17 @@ ExecutorNode::getOrderedSubGoals()
     }
   }
 
-  for (const auto & plan_item : current_plan_.value()) {
-    std::shared_ptr<parser::pddl::tree::DurativeAction> action = get_action_from_string(
-      plan_item.action, domain_client_);
-    apply(action->at_start_effects.root_, local_predicates, local_functions);
-    apply(action->at_end_effects.root_, local_predicates, local_functions);
+  for (const auto & plan_item : current_plan_.value().items) {
+    std::shared_ptr<plansys2_msgs::msg::DurativeAction> action =
+      domain_client_->getDurativeAction(
+      get_action_name(plan_item.action), get_action_params(plan_item.action));
+    apply(action->at_start_effects, local_predicates, local_functions);
+    apply(action->at_end_effects, local_predicates, local_functions);
 
     for (auto it = unordered_subgoals.begin(); it != unordered_subgoals.end(); ) {
-      if (check(*it, local_predicates, local_functions)) {
-        parser::pddl::tree::Goal new_goal("(and " + (*it)->toString() + ")");
+      if (check(goal, local_predicates, local_functions, *it)) {
+        plansys2_msgs::msg::Tree new_goal;
+        parser::pddl::fromString(new_goal, "(and " + parser::pddl::toString(goal, (*it)) + ")");
         ordered_goals.push_back(new_goal);
         it = unordered_subgoals.erase(it);
       } else {
@@ -247,6 +255,21 @@ ExecutorNode::getOrderedSubGoals()
   }
 
   return ordered_goals;
+}
+
+void
+ExecutorNode::get_plan_service_callback(
+  const std::shared_ptr<rmw_request_id_t> request_header,
+  const std::shared_ptr<plansys2_msgs::srv::GetPlan::Request> request,
+  const std::shared_ptr<plansys2_msgs::srv::GetPlan::Response> response)
+{
+  if (current_plan_) {
+    response->success = true;
+    response->plan = current_plan_.value();
+  } else {
+    response->success = false;
+    response->error_info = "Plan not available";
+  }
 }
 
 rclcpp_action::GoalResponse
@@ -281,9 +304,7 @@ ExecutorNode::execute(const std::shared_ptr<GoalHandleExecutePlan> goal_handle)
 
   cancel_plan_requested_ = false;
 
-  auto domain = domain_client_->getDomain();
-  auto problem = problem_client_->getProblem();
-  current_plan_ = planner_client_->getPlan(domain, problem);
+  current_plan_ = goal_handle->get_goal()->plan;
 
   if (!current_plan_.has_value()) {
     RCLCPP_ERROR(get_logger(), "No plan found");
@@ -293,15 +314,31 @@ ExecutorNode::execute(const std::shared_ptr<GoalHandleExecutePlan> goal_handle)
   }
 
   auto action_map = std::make_shared<std::map<std::string, ActionExecutionInfo>>();
+  auto action_timeout_actions = this->get_parameter("action_timeouts.actions").as_string_array();
 
-  for (const auto & action : current_plan_.value()) {
-    auto index = action.action + ":" + std::to_string(static_cast<int>(action.time * 1000));
+  for (const auto & plan_item : current_plan_.value().items) {
+    auto index = plan_item.action + ":" + std::to_string(static_cast<int>(plan_item.time * 1000));
 
     (*action_map)[index] = ActionExecutionInfo();
     (*action_map)[index].action_executor =
-      ActionExecutor::make_shared(action.action, shared_from_this());
+      ActionExecutor::make_shared(plan_item.action, shared_from_this());
     (*action_map)[index].durative_action_info =
-      get_action_from_string(action.action, domain_client_);
+      domain_client_->getDurativeAction(
+      get_action_name(plan_item.action), get_action_params(plan_item.action));
+
+    (*action_map)[index].duration = plan_item.duration;
+    std::string action_name = (*action_map)[index].durative_action_info->name;
+    if (std::find(
+        action_timeout_actions.begin(), action_timeout_actions.end(),
+        action_name) != action_timeout_actions.end() &&
+      this->has_parameter("action_timeouts." + action_name + ".duration_overrun_percentage"))
+    {
+      (*action_map)[index].duration_overrun_percentage = this->get_parameter(
+        "action_timeouts." + action_name + ".duration_overrun_percentage").as_double();
+    }
+    RCLCPP_INFO(
+      get_logger(), "Action %s timeout percentage %f", action_name.c_str(),
+      (*action_map)[index].duration_overrun_percentage);
   }
   ordered_sub_goals_ = getOrderedSubGoals();
 
@@ -321,6 +358,7 @@ ExecutorNode::execute(const std::shared_ptr<GoalHandleExecutePlan> goal_handle)
   factory.registerNodeType<CheckAtEndReq>("CheckAtEndReq");
   factory.registerNodeType<ApplyAtStartEffect>("ApplyAtStartEffect");
   factory.registerNodeType<ApplyAtEndEffect>("ApplyAtEndEffect");
+  factory.registerNodeType<CheckTimeout>("CheckTimeout");
 
   auto bt_xml_tree = bt_builder.get_tree(current_plan_.value());
   auto action_graph = bt_builder.get_graph(current_plan_.value());
@@ -444,6 +482,10 @@ ExecutorNode::get_feedback_info(
 {
   std::vector<plansys2_msgs::msg::ActionExecutionInfo> ret;
 
+  if (!action_map) {
+    return ret;
+  }
+
   for (const auto & action : *action_map) {
     plansys2_msgs::msg::ActionExecutionInfo info;
 
@@ -473,6 +515,7 @@ ExecutorNode::get_feedback_info(
     info.action = action.second.action_executor->get_action_name();
 
     info.arguments = action.second.action_executor->get_action_params();
+    info.duration = rclcpp::Duration::from_seconds(action.second.duration);
     info.completion = action.second.action_executor->get_completion();
     info.message_status = action.second.action_executor->get_feedback();
 

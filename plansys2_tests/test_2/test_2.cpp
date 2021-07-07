@@ -38,10 +38,10 @@ TEST(test_2, test_2)
   auto planner_node = std::make_shared<plansys2::PlannerNode>();
   auto executor_node = std::make_shared<plansys2::ExecutorNode>();
 
-  auto domain_client = std::make_shared<plansys2::DomainExpertClient>(test_node);
-  auto problem_client = std::make_shared<plansys2::ProblemExpertClient>(test_node);
-  auto planner_client = std::make_shared<plansys2::PlannerClient>(test_node);
-  auto executor_client = std::make_shared<plansys2::ExecutorClient>(test_node);
+  auto domain_client = std::make_shared<plansys2::DomainExpertClient>();
+  auto problem_client = std::make_shared<plansys2::ProblemExpertClient>();
+  auto planner_client = std::make_shared<plansys2::PlannerClient>();
+  auto executor_client = std::make_shared<plansys2::ExecutorClient>();
 
   auto move_action_node = plansys2_tests::TestAction::make_shared("move");
   auto ask_charge_node = plansys2_tests::TestAction::make_shared("askcharge");
@@ -54,7 +54,7 @@ TEST(test_2, test_2)
   domain_node->set_parameter({"model_file", pkgpath + "/test_2/pddl/test_2.pddl"});
   problem_node->set_parameter({"model_file", pkgpath + "/test_2/pddl/test_2.pddl"});
 
-  rclcpp::executors::MultiThreadedExecutor exe(rclcpp::executor::ExecutorArgs(), 8);
+  rclcpp::executors::MultiThreadedExecutor exe(rclcpp::ExecutorOptions(), 8);
 
   exe.add_node(domain_node->get_node_base_interface());
   exe.add_node(problem_node->get_node_base_interface());
@@ -96,29 +96,38 @@ TEST(test_2, test_2)
     }
   }
 
-  problem_client->addInstance({"leia", "robot"});
-  problem_client->addInstance({"room_1", "room"});
-  problem_client->addInstance({"room_2", "room"});
-  problem_client->addInstance({"corridor_1", "corridor"});
-  problem_client->addInstance({"zone_1_1", "zone"});
-  problem_client->addInstance({"zone_1_2", "zone"});
-  problem_client->addInstance({"zone_recharge", "zone"});
-  problem_client->addPredicate({"(connected room_1 corridor_1)"});
-  problem_client->addPredicate({"(connected corridor_1 room_1)"});
-  problem_client->addPredicate({"(connected room_2 corridor_1)"});
-  problem_client->addPredicate({"(connected corridor_1 room_2)"});
-  problem_client->addPredicate({"(connected room_1 zone_1_1)"});
-  problem_client->addPredicate({"(connected zone_1_1 room_1)"});
-  problem_client->addPredicate({"(connected room_1 zone_1_2)"});
-  problem_client->addPredicate({"(connected zone_1_2 room_1)"});
-  problem_client->addPredicate({"(connected room_2 zone_recharge)"});
-  problem_client->addPredicate({"(connected zone_recharge room_2)"});
-  problem_client->addPredicate({"(charging_point_at zone_recharge)"});
-  problem_client->addPredicate({"(battery_low leia)"});
-  problem_client->addPredicate({"(robot_at leia zone_1_1)"});
-  problem_client->setGoal({"(and(robot_at leia zone_1_2))"});
+  problem_client->addInstance(plansys2::Instance("leia", "robot"));
+  problem_client->addInstance(plansys2::Instance("room_1", "room"));
+  problem_client->addInstance(plansys2::Instance("room_2", "room"));
+  problem_client->addInstance(plansys2::Instance("corridor_1", "corridor"));
+  problem_client->addInstance(plansys2::Instance("zone_1_1", "zone"));
+  problem_client->addInstance(plansys2::Instance("zone_1_2", "zone"));
+  problem_client->addInstance(plansys2::Instance("zone_recharge", "zone"));
+  problem_client->addPredicate(plansys2::Predicate("(connected room_1 corridor_1)"));
+  problem_client->addPredicate(plansys2::Predicate("(connected corridor_1 room_1)"));
+  problem_client->addPredicate(plansys2::Predicate("(connected room_2 corridor_1)"));
+  problem_client->addPredicate(plansys2::Predicate("(connected corridor_1 room_2)"));
+  problem_client->addPredicate(plansys2::Predicate("(connected room_1 zone_1_1)"));
+  problem_client->addPredicate(plansys2::Predicate("(connected zone_1_1 room_1)"));
+  problem_client->addPredicate(plansys2::Predicate("(connected room_1 zone_1_2)"));
+  problem_client->addPredicate(plansys2::Predicate("(connected zone_1_2 room_1)"));
+  problem_client->addPredicate(plansys2::Predicate("(connected room_2 zone_recharge)"));
+  problem_client->addPredicate(plansys2::Predicate("(connected zone_recharge room_2)"));
+  problem_client->addPredicate(plansys2::Predicate("(charging_point_at zone_recharge)"));
+  problem_client->addPredicate(plansys2::Predicate("(battery_low leia)"));
+  problem_client->addPredicate(plansys2::Predicate("(robot_at leia zone_1_1)"));
 
-  ASSERT_TRUE(executor_client->start_plan_execution());
+  problem_client->setGoal(plansys2::Goal("(and(robot_at leia zone_1_2))"));
+
+  auto domain = domain_client->getDomain();
+  auto problem = problem_client->getProblem();
+  auto plan = planner_client->getPlan(domain, problem);
+
+  ASSERT_FALSE(domain.empty());
+  ASSERT_FALSE(problem.empty());
+  ASSERT_TRUE(plan.has_value());
+
+  ASSERT_TRUE(executor_client->start_plan_execution(plan.value()));
 
   rclcpp::Rate rate(5);
   while (executor_client->execute_and_check_plan()) {

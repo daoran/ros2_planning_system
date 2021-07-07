@@ -28,13 +28,15 @@ using namespace std::placeholders;
 
 using ExecutePlan = plansys2_msgs::action::ExecutePlan;
 
-ExecutorClient::ExecutorClient(rclcpp::Node::SharedPtr provided_node)
-: node_(provided_node)
+ExecutorClient::ExecutorClient()
 {
+  node_ = rclcpp::Node::make_shared("executor_client");
+
   createActionClient();
 
   get_ordered_sub_goals_client_ = node_->create_client<plansys2_msgs::srv::GetOrderedSubGoals>(
     "executor/get_ordered_sub_goals");
+  get_plan_client_ = node_->create_client<plansys2_msgs::srv::GetPlan>("executor/get_plan");
 }
 
 void
@@ -48,11 +50,11 @@ ExecutorClient::createActionClient()
 }
 
 bool
-ExecutorClient::start_plan_execution()
+ExecutorClient::start_plan_execution(const plansys2_msgs::msg::Plan & plan)
 {
   if (!executing_plan_) {
     createActionClient();
-    auto success = on_new_goal_received();
+    auto success = on_new_goal_received(plan);
 
     if (success) {
       executing_plan_ = true;
@@ -105,8 +107,11 @@ ExecutorClient::execute_and_check_plan()
 
 
 bool
-ExecutorClient::on_new_goal_received()
+ExecutorClient::on_new_goal_received(const plansys2_msgs::msg::Plan & plan)
 {
+  auto goal = ExecutePlan::Goal();
+  goal.plan = plan;
+
   auto send_goal_options = rclcpp_action::Client<ExecutePlan>::SendGoalOptions();
 
   send_goal_options.feedback_callback =
@@ -115,7 +120,7 @@ ExecutorClient::on_new_goal_received()
   send_goal_options.result_callback =
     std::bind(&ExecutorClient::result_callback, this, _1);
 
-  auto future_goal_handle = action_client_->async_send_goal(goal_, send_goal_options);
+  auto future_goal_handle = action_client_->async_send_goal(goal, send_goal_options);
 
   if (rclcpp::spin_until_future_complete(
       node_->get_node_base_interface(), future_goal_handle, 3s) !=
@@ -167,9 +172,9 @@ ExecutorClient::cancel_plan_execution()
   goal_result_available_ = false;
 }
 
-std::vector<parser::pddl::tree::Goal> ExecutorClient::getOrderedSubGoals()
+std::vector<plansys2_msgs::msg::Tree> ExecutorClient::getOrderedSubGoals()
 {
-  std::vector<parser::pddl::tree::Goal> ret;
+  std::vector<plansys2_msgs::msg::Tree> ret;
 
   while (!get_ordered_sub_goals_client_->wait_for_service(std::chrono::seconds(5))) {
     if (!rclcpp::ok()) {
@@ -186,16 +191,13 @@ std::vector<parser::pddl::tree::Goal> ExecutorClient::getOrderedSubGoals()
   auto future_result = get_ordered_sub_goals_client_->async_send_request(request);
 
   if (rclcpp::spin_until_future_complete(node_, future_result, std::chrono::seconds(1)) !=
-    rclcpp::executor::FutureReturnCode::SUCCESS)
+    rclcpp::FutureReturnCode::SUCCESS)
   {
     return ret;
   }
 
   if (future_result.get()->success) {
-    for (std::string goal_str : future_result.get()->sub_goals) {
-      parser::pddl::tree::Goal new_goal(goal_str);
-      ret.push_back(new_goal);
-    }
+    ret = future_result.get()->sub_goals;
   } else {
     RCLCPP_INFO_STREAM(
       node_->get_logger(),
@@ -204,6 +206,39 @@ std::vector<parser::pddl::tree::Goal> ExecutorClient::getOrderedSubGoals()
   }
 
   return ret;
+}
+
+std::optional<plansys2_msgs::msg::Plan> ExecutorClient::getPlan()
+{
+  while (!get_plan_client_->wait_for_service(std::chrono::seconds(5))) {
+    if (!rclcpp::ok()) {
+      return {};
+    }
+    RCLCPP_ERROR_STREAM(
+      node_->get_logger(),
+      get_plan_client_->get_service_name() <<
+        " service  client: waiting for service to appear...");
+  }
+
+  auto request = std::make_shared<plansys2_msgs::srv::GetPlan::Request>();
+
+  auto future_result = get_plan_client_->async_send_request(request);
+
+  if (rclcpp::spin_until_future_complete(node_, future_result, std::chrono::seconds(1)) !=
+    rclcpp::FutureReturnCode::SUCCESS)
+  {
+    return {};
+  }
+
+  if (future_result.get()->success) {
+    return future_result.get()->plan;
+  } else {
+    RCLCPP_ERROR_STREAM(
+      node_->get_logger(),
+      get_plan_client_->get_service_name() << ": " <<
+        future_result.get()->error_info);
+    return {};
+  }
 }
 
 void

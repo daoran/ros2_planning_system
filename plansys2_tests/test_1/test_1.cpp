@@ -38,10 +38,10 @@ TEST(test_1, test_1)
   auto planner_node = std::make_shared<plansys2::PlannerNode>();
   auto executor_node = std::make_shared<plansys2::ExecutorNode>();
 
-  auto domain_client = std::make_shared<plansys2::DomainExpertClient>(test_node);
-  auto problem_client = std::make_shared<plansys2::ProblemExpertClient>(test_node);
-  auto planner_client = std::make_shared<plansys2::PlannerClient>(test_node);
-  auto executor_client = std::make_shared<plansys2::ExecutorClient>(test_node);
+  auto domain_client = std::make_shared<plansys2::DomainExpertClient>();
+  auto problem_client = std::make_shared<plansys2::ProblemExpertClient>();
+  auto planner_client = std::make_shared<plansys2::PlannerClient>();
+  auto executor_client = std::make_shared<plansys2::ExecutorClient>();
 
   auto move_action_node = plansys2_tests::TestAction::make_shared("move");
   auto ask_charge_node = plansys2_tests::TestAction::make_shared("askcharge");
@@ -54,7 +54,7 @@ TEST(test_1, test_1)
   domain_node->set_parameter({"model_file", pkgpath + "/test_1/pddl/test_1.pddl"});
   problem_node->set_parameter({"model_file", pkgpath + "/test_1/pddl/test_1.pddl"});
 
-  rclcpp::executors::MultiThreadedExecutor exe(rclcpp::executor::ExecutorArgs(), 8);
+  rclcpp::executors::MultiThreadedExecutor exe(rclcpp::ExecutorOptions(), 8);
 
   exe.add_node(domain_node->get_node_base_interface());
   exe.add_node(problem_node->get_node_base_interface());
@@ -96,29 +96,38 @@ TEST(test_1, test_1)
     }
   }
 
-  problem_client->addInstance({"leia", "robot"});
-  problem_client->addInstance({"entrance", "room"});
-  problem_client->addInstance({"kitchen", "room"});
-  problem_client->addInstance({"bedroom", "room"});
-  problem_client->addInstance({"dinning", "room"});
-  problem_client->addInstance({"bathroom", "room"});
-  problem_client->addInstance({"chargingroom", "room"});
-  problem_client->addPredicate({"(connected entrance dinning)"});
-  problem_client->addPredicate({"(connected dinning entrance)"});
-  problem_client->addPredicate({"(connected dinning kitchen)"});
-  problem_client->addPredicate({"(connected kitchen dinning)"});
-  problem_client->addPredicate({"(connected dinning bedroom)"});
-  problem_client->addPredicate({"(connected bedroom dinning)"});
-  problem_client->addPredicate({"(connected bathroom bedroom)"});
-  problem_client->addPredicate({"(connected bedroom bathroom)"});
-  problem_client->addPredicate({"(connected chargingroom kitchen)"});
-  problem_client->addPredicate({"(connected kitchen chargingroom)"});
-  problem_client->addPredicate({"(charging_point_at chargingroom)"});
-  problem_client->addPredicate({"(battery_low leia)"});
-  problem_client->addPredicate({"(robot_at leia entrance)"});
-  problem_client->setGoal({"(and(robot_at leia bathroom))"});
+  problem_client->addInstance(plansys2::Instance("leia", "robot"));
+  problem_client->addInstance(plansys2::Instance("entrance", "room"));
+  problem_client->addInstance(plansys2::Instance("kitchen", "room"));
+  problem_client->addInstance(plansys2::Instance("bedroom", "room"));
+  problem_client->addInstance(plansys2::Instance("dinning", "room"));
+  problem_client->addInstance(plansys2::Instance("bathroom", "room"));
+  problem_client->addInstance(plansys2::Instance("chargingroom", "room"));
+  problem_client->addPredicate(plansys2::Predicate("(connected entrance dinning)"));
+  problem_client->addPredicate(plansys2::Predicate("(connected dinning entrance)"));
+  problem_client->addPredicate(plansys2::Predicate("(connected dinning kitchen)"));
+  problem_client->addPredicate(plansys2::Predicate("(connected kitchen dinning)"));
+  problem_client->addPredicate(plansys2::Predicate("(connected dinning bedroom)"));
+  problem_client->addPredicate(plansys2::Predicate("(connected bedroom dinning)"));
+  problem_client->addPredicate(plansys2::Predicate("(connected bathroom bedroom)"));
+  problem_client->addPredicate(plansys2::Predicate("(connected bedroom bathroom)"));
+  problem_client->addPredicate(plansys2::Predicate("(connected chargingroom kitchen)"));
+  problem_client->addPredicate(plansys2::Predicate("(connected kitchen chargingroom)"));
+  problem_client->addPredicate(plansys2::Predicate("(charging_point_at chargingroom)"));
+  problem_client->addPredicate(plansys2::Predicate("(battery_low leia)"));
+  problem_client->addPredicate(plansys2::Predicate("(robot_at leia entrance)"));
 
-  ASSERT_TRUE(executor_client->start_plan_execution());
+  problem_client->setGoal(plansys2::Goal("(and(robot_at leia bathroom))"));
+
+  auto domain = domain_client->getDomain();
+  auto problem = problem_client->getProblem();
+  auto plan = planner_client->getPlan(domain, problem);
+
+  ASSERT_FALSE(domain.empty());
+  ASSERT_FALSE(problem.empty());
+  ASSERT_TRUE(plan.has_value());
+
+  ASSERT_TRUE(executor_client->start_plan_execution(plan.value()));
 
   rclcpp::Rate rate(5);
   while (executor_client->execute_and_check_plan()) {
